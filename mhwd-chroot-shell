@@ -1,0 +1,140 @@
+#!/bin/bash
+shopt -s extglob
+
+if [ $EUID -ne 0 ]; then
+    echo -e "\n${0##*/} must be run with root privileges !\n"
+    exit 1
+fi
+mountpoint=/mnt/repchroot
+if [ -d $mountpoint ]; then
+    old_IFS=$IFS
+    IFS=$'\n'
+    for i in $(mount | grep "$mountpoint" | tac | awk '{print $3}')
+    do
+        umount $mountpoint 2>/dev/null
+    done
+    IFS=$old_IFS
+else
+    mkdir -p $mountpoint 2>/dev/null
+fi
+curetc=$(df /etc | sed -n '/^\//p')
+curetc=${curetc%% *}
+list=()
+nbpart=0
+
+# Search for partitions containing /etc
+for i in $(ls /dev/[hs]d[a-z][1-9]*)
+do
+    [ $i = "$curetc" ] && continue
+    mount $i $mountpoint 2>/dev/null
+    if [ $? -eq 0 ]; then
+        if [ -d $mountpoint/etc ]; then
+            list[$nbpart]=$i
+            ((nbpart++))
+        fi
+    fi
+    # -l below necesary, don't know why !?!?!?
+    umount -l $mountpoint 2>/dev/null
+done
+
+# Exit if no other linux system available
+if [ $nbpart -eq 0 ]; then
+    echo -e "\nNo linux system found !\n"
+    sleep 5
+    exit 1
+fi
+
+if [ $nbpart != 1 ]; then
+    echo -e "\nList of found systems"
+    echo -e "====================="
+    for((i=0; i < $nbpart; i++))
+    do
+        v=${list[$i]}
+        l=$(e2label $v)
+        [ ! -z $l ] && l='('$l')'
+        echo "$i) $v $l"
+    done
+
+    # Choice of the system to chroot
+    echo -en "\nPlease enter your choice [0-$((nbpart-1))] : "
+    while read n
+    do
+        if [[ $n = +([0-9]) ]]; then
+            [ $n -lt $nbpart ] && break
+        fi
+        echo -en "\nPlease enter your choice [0-$((nbpart-1))] : "
+    done
+else
+    n=0
+fi
+
+echo ${list[n]}
+
+# mount /
+mount ${list[n]} $mountpoint
+
+# mount /boot (if exists)
+#cat $mountpoint/etc/fstab
+indboot=false
+boot=$(grep -s '^[^#].*[      ]/boot[         ]' /$mountpoint/etc/fstab)
+if [ $? -eq 0 ]; then
+    indboot=true
+    comm=$(echo $boot | awk '{print "mount -t " $3 " " $1}')
+    comm=${comm}" $mountpoint/boot"
+    $comm
+fi
+
+# mount /home (if exists)
+indhome=false
+home=$(grep -s '^[^#].*[      ]/home[         ]' /$mountpoint/etc/fstab)
+if [ $? -eq 0 ]; then
+    indhome=true
+    comm=$(echo $home | awk '{print "mount -t " $3 " " $1}')
+    comm=${comm}" $mountpoint/home"
+    $comm
+fi
+
+# activate swap (if exists and not already activated)
+indswap=$(swapon -s)
+if [ -z "$indswap" ]; then
+    swap=$(grep -s '^[^#].*[      ]swap[         ]' /$mountpoint/etc/fstab)
+    if [ $? -eq 0 ]; then
+        comm=$(echo $swap | awk '{print "swapon " $1}')
+        echo $comm
+        $comm
+    fi
+fi
+
+# mount proc, sys, dev and chroot
+mount -B /proc    $mountpoint/proc
+mount -B /dev     $mountpoint/dev
+mount -B /sys     $mountpoint/sys
+mount -B /dev/pts $mountpoint/dev/pts
+mount -B /tmp     $mountpoint/tmp
+# mount /run if it exists
+[ -d $mountpoint/run ] && mount -B /run $mountpoint/run
+cp /etc/resolv.conf $mountpoint/etc/resolv.conf
+# read the architecture of the target
+elf=$(file $mountpoint/usr/bin/file)
+elf=${elf#*ELF *}
+elf=${elf%%-*}
+if [ "$elf" == 32 ]; then
+    arch=i686
+else
+    arch=x86_64
+    if [ $(uname -m) == i686 ]; then
+        echo "Error : impossible to chroot from a 32 to a 64 system"
+        sleep 5
+        exit 1
+    fi
+fi
+
+setarch $arch chroot $mountpoint /bin/bash
+[ -d $mountpoint/run ] && umount -f $mountpoint/run
+umount -f $mountpoint/{tmp,dev/pts,sys,dev,proc}
+[ $indhome = true ] && umount $mountpoint/home
+[ $indboot = true ] && umount $mountpoint/boot
+umount $mountpoint
+rmdir $mountpoint
+exit 0
+ 
