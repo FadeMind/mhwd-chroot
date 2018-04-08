@@ -29,7 +29,7 @@ if [ $EUID -ne 0 ]; then
             chgroot="gksu"
         else
             if [ -x /usr/bin/kdesu ]; then
-                chgroot="kdesu"
+                chgroot="kdesu -c"
             else
                 echo -e "\nError : No root privileges !\n"
                 exit 1
